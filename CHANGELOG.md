@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-30
+
+### Added
+- v0.6.1 of this rehearsal.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added
