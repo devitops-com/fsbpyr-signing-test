@@ -1,0 +1,340 @@
+name: Release
+
+# For a pushed version tag (tools/release/release.sh pushes it, on a main commit whose
+# full-suite.yml run passed): build the executables from the tag (build.yml, without its
+# checks: the full suite ran them on this very commit), sign their checksums, attest them and
+# publish the GitHub release, with every (target, Python) entry's executable, its .xz, licence
+# notices and SBOM. Nothing is tested here. GitHub artifact attestations can only be made inside
+# GitHub Actions, so releases are built here and not on the maintainer's machine.
+#
+# Signing (docs/signing.md §5.3): prepare runs built code, with a read-only token and no secret;
+# sign holds the release key K and runs no built code; publish writes, and runs no built code. A
+# release that cannot be signed, or whose signature the clients would refuse, is not published.
+# With the repository variable FSBPYR_RECOVERY=1, sign is skipped and publish stops at a draft,
+# which the admin signs by hand with the recovery key (§5.4).
+
+on:
+  push:
+    tags: ["v*"]
+
+# A tag is built once: a second run for the same tag waits instead of cancelling the first.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.12", "3.13", "3.14", "3.15"]
+        target: ["x86_64-linux-gnu", "aarch64-linux-gnu"]
+    env:
+      ASSET: fsbpyr-${{ matrix.python }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          [ ! -e FAIL_BUILD ] || exit 1
+          mkdir dist
+          for name in "$ASSET" "$ASSET.xz" "$ASSET.cdx.json" "THIRD_PARTY_LICENSES-${{ matrix.python }}-${{ matrix.target }}.txt"; do
+            echo "fake $name of $GITHUB_REF_NAME" > "dist/$name"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: built-${{ matrix.python }}-${{ matrix.target }}
+          path: dist/*
+
+  # One attestation per executable: attest-sbom takes one SBOM and the subjects it describes.
+  # publish needs every one of them. It attests the SBOM that build made (the one publish
+  # uploads); the full suite's compare checked that SBOM's bytes against its rebuild's.
+  sbom:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo a stand-in for the real job
+
+  # The part of the release that runs built code: the newest x86-64 build reads the executables
+  # for make-install.sh. So it gets no secret, and a token that can write nothing. Nothing it
+  # makes is taken on trust: sign writes the sums again from the build job's files.
+  prepare:
+    name: install.sh + SHA256SUMS
+    needs: [build, sbom]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # no later step needs the token in .git/config
+
+      # Every target's and variant's files, side by side in dist/ (they have different names).
+      # needs: build holds this back until every (target, Python) entry is built, the
+      # aarch64 ones included.
+      - name: Download the executables
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: built-*
+          merge-multiple: true
+          path: dist
+
+      # The installer, with this release's version, targets, Pythons and the SHA-256 and glibc
+      # of every executable written into it (tools/release/make-install.sh), so it lists every
+      # target and Python that was built. The newest Python's x86-64 build runs on this runner
+      # and reads the other files (aarch64 too) for their glibc.
+      - name: Make install.sh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          echo "#!/bin/sh" > dist/install.sh
+
+      # `sha256sum -c --ignore-missing SHA256SUMS` checks a download against the digests the
+      # attestation signs. The globs take every target and Python that build made:
+      # fsbpyr-3.X-TARGET with its .xz and its .cdx.json (the SBOM, attested by the sbom job),
+      # and THIRD_PARTY_LICENSES-3.X-TARGET.txt; install.sh is listed too.
+      - name: SHA256SUMS
+        env:
+          LC_ALL: C  # the order of the globs, which sign's copy must have too
+        run: |
+          (cd dist && sha256sum fsbpyr* THIRD_PARTY_LICENSES*.txt install.sh > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prepared
+          path: |
+            dist/install.sh
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  # Signs SHA256SUMS with K, in an image pinned by digest. It runs no fsbpyr and no built code,
+  # and no action but GitHub's checkout, download-artifact and upload-artifact.
+  sign:
+    name: sign SHA256SUMS
+    needs: prepare
+    if: vars.FSBPYR_RECOVERY != '1'
+    runs-on: ubuntu-24.04
+    container: docker.io/library/debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
+    timeout-minutes: 20
+    environment: release-signing  # K's secrets; the environment's rule lets only tags in
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      # apt checks Debian's signatures. This and everything up to the signing step run before K
+      # is anywhere in the job. The image has the openssl library but not the command, and
+      # checkout needs git for the history: the pins of the previous release are in a tag.
+      - name: Install what signing needs
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              git openssl curl jq ca-certificates
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # no later step needs the token in .git/config
+          fetch-depth: 0  # every tag: this one's pins, and the previous release's
+
+      - name: Which release
+        run: |
+          xyz='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          [[ "$TAG" =~ $xyz ]] || { echo "::error::'$TAG' is no release tag vX.Y.Z"; exit 1; }
+        shell: bash
+
+      - name: Download the executables
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: built-*
+          merge-multiple: true
+          path: signed
+
+      - name: Download install.sh and the sums
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prepared
+          path: prepared
+
+      # prepare ran the built fsbpyr on a runner with passwordless sudo, so its files are that
+      # code's to choose, and the pattern above would take an artifact it uploaded under a name of
+      # its own: so the files must be exactly the assets of every (Python, target). Without this
+      # compare K would sign whatever lines prepare wrote, digests of files never published among
+      # them. With it, every line but install.sh's names an asset the release expects, and
+      # install.sh is published and attested. It does not stop a poisoned build: the build job ran
+      # the same code.
+      - name: Write the sums again
+        env:
+          LC_ALL: C
+        shell: bash
+        run: |
+          expected=()
+          for python in 3.12 3.13 3.14 3.15; do
+            for target in x86_64-linux-gnu aarch64-linux-gnu; do
+              expected+=("fsbpyr-$python-$target" "fsbpyr-$python-$target.xz"
+                         "fsbpyr-$python-$target.cdx.json" "THIRD_PARTY_LICENSES-$python-$target.txt")
+            done
+          done
+          found="$(cd signed && ls | sort)"
+          [ "$found" = "$(printf '%s\n' "${expected[@]}" | sort)" ] \
+            || { echo "::error::the build job's files are not the assets expected:"; echo "$found"; exit 1; }
+          cp prepared/install.sh signed/
+          (cd signed && sha256sum fsbpyr* THIRD_PARTY_LICENSES*.txt install.sh > SHA256SUMS)
+          cmp signed/SHA256SUMS prepared/SHA256SUMS \
+            || { echo "::error::prepare's SHA256SUMS is not the sums of the build job's files"; exit 1; }
+
+      # The one step that holds K: only its env gets the secrets, and K is on disk for as long
+      # as the script runs. The script checks the new signature against K's own public keys. A
+      # job step has no terminal, so an unset secret stops it there: exit 2.
+      - name: Sign
+        env:
+          FSBPYR_RELEASE_KEY: ${{ secrets.FSBPYR_RELEASE_KEY }}
+          FSBPYR_SIGNING_PASSPHRASE: ${{ secrets.FSBPYR_SIGNING_PASSPHRASE }}
+        shell: bash
+        run: |
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f -- "$key"' EXIT
+          (umask 077 && printf '%s\n' "$FSBPYR_RELEASE_KEY" > "$key")
+          bash tools/release/release-signing.sh sign "$key" signed/SHA256SUMS
+
+      # A signature by the wrong key passes the step above. Against the keys this tag pins, for
+      # this release's own fsbpyr, and against the previous release's, for the fsbpyr that
+      # updates to this one.
+      - name: Check the signature as the clients will
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FSBPYR_RELEASES_API: https://api.github.com/repos/${{ github.repository }}/releases
+        shell: bash
+        run: |
+          previous="$(bash tools/release/previous-release.sh "$TAG")"
+          bash tools/release/check-signature.sh . signed/SHA256SUMS "$TAG" "$previous"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: |
+            signed/SHA256SUMS
+            signed/SHA256SUMS.sig
+          if-no-files-found: error
+
+  # Runs when prepare passed and sign did, or in a recovery, where sign is skipped and the
+  # release stays a draft. A skipped job skips the jobs that need it, so the condition starts
+  # with !cancelled(), which also drops the implicit success() of the other needs: prepare has
+  # those, and nothing else here may let a release through unsigned. needs.sign.result decides
+  # below; FSBPYR_RECOVERY is not read again.
+  publish:
+    name: attest + publish
+    needs: [prepare, sign]
+    if: ${{ !cancelled() && needs.prepare.result == 'success'
+            && (needs.sign.result == 'success'
+                || (needs.sign.result == 'skipped' && vars.FSBPYR_RECOVERY == '1')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only job that may write: the build above ran with a read-only token. It runs no built
+    # code.
+    permissions:
+      actions: read        # the tagged commit's full suite run (gh run list)
+      contents: write      # create the GitHub release
+      id-token: write      # sign the attestation (Sigstore, through the job's OIDC token)
+      attestations: write  # store it with the repository
+    env:
+      SIGNED: ${{ needs.sign.result == 'success' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # gh gets the token through GH_TOKEN
+          fetch-depth: 0  # green-run.sh compares a documentation-only commit with its tested ancestor
+
+      # A release is made from a main commit whose full-suite.yml run passed:
+      # tools/release/release.sh checks that before it tags, this checks it again for the tagged
+      # commit, and the release notes name the run.
+      - name: Check the commit's full suite run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "FULL_SUITE_RUN=rehearsal" >> "$GITHUB_ENV"
+
+      - name: Download the executables
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: built-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download install.sh and the sums
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prepared
+          path: prepared
+
+      - name: Download the signature
+        if: needs.sign.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: signed
+
+      # Before anything is attested or uploaded. A later job can replace an earlier job's
+      # artifact of the same run, so these are checked, not assumed: against sign's copy of the
+      # sums, or in a recovery against prepare's, whose attestation the admin checks by hand. The
+      # sums are written again, so a file too many stops it as well as a file that differs: the
+      # steps below take what the globs find.
+      - name: Check the files against the sums
+        env:
+          LC_ALL: C
+        run: |
+          cp prepared/install.sh dist/
+          (cd dist && sha256sum fsbpyr* THIRD_PARTY_LICENSES*.txt install.sh) > found
+          if [ "$SIGNED" = true ]; then
+            cp signed/SHA256SUMS signed/SHA256SUMS.sig dist/
+          else
+            cp prepared/SHA256SUMS dist/
+          fi
+          cmp found dist/SHA256SUMS
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          bash tools/release/release-notes.sh "${TAG#v}" > "$RUNNER_TEMP/notes.md"
+          printf '\nFull suite: %s\n' "$FULL_SUITE_RUN" >> "$RUNNER_TEMP/notes.md"
+
+      # Verify with: gh attestation verify fsbpyr-3.14-x86_64-linux-gnu --repo devitops-com/fsbpyr \
+      #   --signer-workflow devitops-com/fsbpyr/.github/workflows/release.yml \
+      #   --source-ref "refs/tags/$tag"
+      # (or fsbpyr-3.12-aarch64-linux-gnu, a .xz, install.sh, SHA256SUMS and the other assets)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/fsbpyr*
+            dist/THIRD_PARTY_LICENSES*.txt
+            dist/install.sh
+            dist/SHA256SUMS
+
+      # Unsigned only in a recovery, and then a draft: it publishes nothing, and the admin signs
+      # it with R by hand. A release that signed fsbpyr would refuse is never published here.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ runner.temp }}/notes.md
+        run: |
+          assets=(dist/fsbpyr* dist/THIRD_PARTY_LICENSES*.txt dist/install.sh dist/SHA256SUMS)
+          draft=()
+          if [ "$SIGNED" = true ]; then
+            assets+=(dist/SHA256SUMS.sig)
+          else
+            draft=(--draft)
+          fi
+          gh release create "$TAG" --verify-tag "${draft[@]}" --title "fsbpyr $TAG" \
+            --notes-file "$NOTES" "${assets[@]}"
