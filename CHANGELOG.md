@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.6.2] - 2026-10-31
+
+The real executable of the play.
+
 ## [Unreleased]
 
 ## [0.6.1] - 2026-10-30
