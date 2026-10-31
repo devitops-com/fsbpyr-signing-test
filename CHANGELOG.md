@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.2] - 2026-10-31
+
+One command.
+
 ## [0.8.1] - 2026-10-31
 
 The final scripts.

@@ -1,4 +1,4 @@
-# version-files.sh — sourced by prepare.sh and release.sh: fsbpyr's version, which lives in three
+# version-files.sh — sourced by prepare.sh and release-assets.sh: fsbpyr's version, which lives in three
 # files that must agree: pyproject.toml's [project] version, src/fsbpyr/__init__.py's
 # __version__ and fsbpyr's own entry in uv.lock.
 

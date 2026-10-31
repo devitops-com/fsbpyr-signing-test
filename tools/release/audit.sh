@@ -6,6 +6,7 @@
 #     bash tools/release/audit.sh                 (make release-audit)
 #     bash tools/release/audit.sh --accept        take today's state as the reference
 #     bash tools/release/audit.sh --record TAG    add a release this machine has just published
+#     bash tools/release/audit.sh --record-wiki   take the wiki's head, after make wiki-publish
 #
 # Checked: every tag against this clone; GitHub's main is known here; every published release is on
 # record, with the same commit and the same files, immutable, and signed by the keys its tag pins;
@@ -40,7 +41,7 @@ failures=0
 fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 
 usage() {
-    echo "usage: audit.sh [--accept | --record TAG]" >&2
+    echo "usage: audit.sh [--accept | --record TAG | --record-wiki]" >&2
     exit 2
 }
 
@@ -137,6 +138,17 @@ record() { # TAG
     echo "recorded $1"
 }
 
+# Only the one line: --accept would take everything else that differs along with it. With no
+# record yet there is nothing to keep up to date.
+record_wiki() {
+    local head
+    [[ -f "$STATE/settings" ]] || return 0
+    head=$(git -C "$ROOT" ls-remote "$WIKI" HEAD | awk '{ print $1 }')
+    [[ -n "$head" ]] || { echo "ERROR: the wiki has no head" >&2; exit 2; }
+    awk -v line="wiki $head" '/^wiki / { print line; next } { print }' "$STATE/settings" >"$STATE/settings.new"
+    mv -f "$STATE/settings.new" "$STATE/settings"
+}
+
 check_tags_and_main() {
     local here differs main
     here=$(local_tags)
@@ -231,6 +243,7 @@ case "${1-}:$#" in
     :0) ;;
     --accept:1) accept; exit 0 ;;
     --record:2) record "$2"; exit 0 ;;
+    --record-wiki:1) record_wiki; exit 0 ;;
     *) usage ;;
 esac
 

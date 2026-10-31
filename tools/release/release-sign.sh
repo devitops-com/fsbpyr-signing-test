@@ -127,7 +127,6 @@ check_attestation() { # file, workflow, release
         --source-digest "$COMMIT" --deny-self-hosted-runners --format json) \
         || die "the attestation of $3's ${1##*/} does not name your commit $COMMIT: refusing to sign"
     uris=$(jq -r '.[].verificationResult.signature.certificate.runInvocationURI' <<<"$attestation")
-    [ -n "$uris" ] || die "the attestation of $3 names no run: refusing to sign"
     while IFS= read -r uri; do
         [[ "$uri" =~ ^https://github\.com/$REPOSITORY/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]] \
             || die "the attestation of $3 names the run '$uri': refusing to sign"
@@ -164,32 +163,40 @@ unchanged() { # directory, release
         || die "the draft $2 changed while it was being signed: nothing was published, see what changed before anything else"
 }
 
-sign_release() { # release, sums file, workflow, make_latest value
-    local release=$1 sums=$2 workflow=$3 latest=$4 dir=$WORK/$1 previous
+check_release() { # release, sums file, workflow
+    local release=$1 sums=$2 workflow=$3 dir=$WORK/$1
     echo "==> Checking the draft $release"
     gh release download "$release" --repo "$REPOSITORY" --dir "$dir"
     [ -f "$dir/$sums" ] || die "the draft $release has no $sums"
     [ ! -e "$dir/$sums.sig" ] || die "the draft $release already has a signature. If a run of this command stopped after uploading it, remove it (gh release delete-asset $release $sums.sig); if not, someone else put it there"
     check_attestation "$dir/$sums" "$workflow" "$release"
     check_files "$dir" "$sums" "$release"
-    cat <<SUMMARY
+}
 
-About to sign and publish:
-  repo    : $REPOSITORY
-  release : $release  ($(find "$dir" -mindepth 1 -maxdepth 1 | wc -l) files)
-  commit  : $COMMIT
-            your HEAD, GitHub's $BRANCH, GitHub's $TAG and the attestation all name it,
-            and every job of its run ran on GitHub's machines
-  sums    : $sums  $(sha256sum "$dir/$sums" | cut -d' ' -f1)
-  key     : $KEY
+summary_of() { # release, sums file
+    local dir=$WORK/$1
+    printf '  release : %s  (%s files)\n' "$1" "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l)"
+    printf '  sums    : %s  %s\n' "$2" "$(sha256sum "$dir/$2" | cut -d' ' -f1)"
+}
 
-This signs with the key on this machine and uploads only the signature. Publishing is final:
-a published release cannot be changed.
-SUMMARY
-    confirm_or_abort
-    bash tools/release/release-signing.sh sign "$KEY" "$dir/$sums"
+# Once, for all the signing of this run. From no environment: it goes to the signing alone.
+passphrase() {
+    typed=${FSBPYR_SIGNING_PASSPHRASE-}
+    [ -z "$typed" ] || return 0
+    { : </dev/tty; } 2>/dev/null || die "no passphrase: set FSBPYR_SIGNING_PASSPHRASE or run this on a terminal"
+    IFS= read -rsp "Passphrase of $KEY: " typed </dev/tty
+    echo >&2
+}
+
+sign_sums() { # release, sums file
+    local file=$WORK/$1/$2 previous
+    FSBPYR_SIGNING_PASSPHRASE=$typed bash tools/release/release-signing.sh sign "$KEY" "$file"
     previous=$(bash tools/release/previous-release.sh "$TAG")
-    bash tools/release/check-signature.sh . "$dir/$sums" "$TAG" "$previous"
+    bash tools/release/check-signature.sh . "$file" "$TAG" "$previous"
+}
+
+publish_release() { # release, sums file, make_latest value
+    local release=$1 sums=$2 latest=$3 dir=$WORK/$1
     mv "$dir/$sums.sig" "$WORK/$release.sig"
     unchanged "$dir" "$release"
     mv "$WORK/$release.sig" "$dir/$sums.sig"
@@ -206,15 +213,36 @@ main_state=$(state_of "$TAG")
 el8_state=$(state_of "$EL8_TAG")
 case "$main_state" in
     none) die "$TAG has no draft: release.yml has not finished" ;;
-    draft) sign_release "$TAG" SHA256SUMS release.yml true ;;
     published) echo "$TAG is published" ;;
 esac
 case "$el8_state" in
     none) echo "$EL8_TAG has no draft yet: run this again when el8.yml has finished, or leave it, as a release may have no EL8 stubs" ;;
-    draft) sign_release "$EL8_TAG" SHA256SUMS-glibc2.28 el8.yml false ;;
     published) echo "$EL8_TAG is published" ;;
 esac
+[ "$main_state" = draft ] || [ "$el8_state" = draft ] || exit 0
+
+# Both drafts are checked, and both signed, before either is published: a wrong passphrase, or a
+# companion that does not pass, leaves nothing half done.
+[ "$main_state" != draft ] || check_release "$TAG" SHA256SUMS release.yml
+[ "$el8_state" != draft ] || check_release "$EL8_TAG" SHA256SUMS-glibc2.28 el8.yml
+printf '\nAbout to sign and publish, on %s:\n' "$REPOSITORY"
+[ "$main_state" != draft ] || summary_of "$TAG" SHA256SUMS
+[ "$el8_state" != draft ] || summary_of "$EL8_TAG" SHA256SUMS-glibc2.28
+cat <<SUMMARY
+  commit  : $COMMIT
+            your HEAD, GitHub's $BRANCH, GitHub's $TAG and the attestation all name it,
+            and every job of its run ran on GitHub's machines
+  key     : $KEY
+
+This signs with the key on this machine and uploads only the signature. Publishing is final:
+a published release cannot be changed.
+SUMMARY
+confirm_or_abort
+passphrase
+[ "$main_state" != draft ] || sign_sums "$TAG" SHA256SUMS
+[ "$el8_state" != draft ] || sign_sums "$EL8_TAG" SHA256SUMS-glibc2.28
+[ "$main_state" != draft ] || publish_release "$TAG" SHA256SUMS true
+[ "$el8_state" != draft ] || publish_release "$EL8_TAG" SHA256SUMS-glibc2.28 false
 
 # --- 5. As GitHub now serves it ----------------------------------------------
-[ "$main_state" != draft ] && [ "$el8_state" != draft ] \
-    || bash tools/release/audit.sh || die "the audit fails after publishing: see above"
+bash tools/release/audit.sh || die "the audit fails after publishing: see above"

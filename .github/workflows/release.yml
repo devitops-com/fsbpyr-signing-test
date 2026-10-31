@@ -1,6 +1,6 @@
 name: Release
 
-# For a pushed version tag (tools/release/release.sh pushes it, on a main commit whose
+# For a pushed version tag (tools/release/release-assets.sh pushes it, on a main commit whose
 # full-suite.yml run passed): build the executables from the tag (build.yml, without its
 # checks: the full suite ran them on this very commit), attest them and leave a draft of the GitHub
 # release, with every (target, Python) entry's executable, its .xz, licence notices and SBOM.
@@ -138,7 +138,7 @@ jobs:
           fetch-depth: 0  # green-run.sh compares a documentation-only commit with its tested ancestor
 
       # A release is made from a main commit whose full-suite.yml run passed:
-      # tools/release/release.sh checks that before it tags, this checks it again for the tagged
+      # tools/release/release-assets.sh checks that before it tags, this checks it again for the tagged
       # commit, and the release notes name the run.
       - name: Check the commit's full suite run
         env:

@@ -1,4 +1,4 @@
-# confirm.sh — sourced by release.sh and release-sign.sh: ask before something outward-facing.
+# confirm.sh — sourced by release-assets.sh and release-sign.sh: ask before something outward-facing.
 
 # confirm_or_abort: Continue? on the terminal. FSBPYR_RELEASE_ASSUME_YES=1 skips the prompt.
 confirm_or_abort() {
