@@ -10,10 +10,15 @@
 # companion el8-vX.Y.Z when el8.yml has finished later than release.yml.
 #
 # Nothing is signed unless your HEAD, GitHub's main, GitHub's tag and the attestation of the sums
-# file all name one commit. That rests on GitHub itself being sound, and an account on it being
-# what may be lost: an account cannot get GitHub to attest a file for a commit that did not build
-# it. The attested sums then vouch for every other file. What that commit holds is the admin's to
-# know, so this is only as good as what they pulled into main.
+# file all name one commit, and every job of the run the attestation names ran on GitHub's own
+# machines: the attestation is made after the build, and says nothing of where the build ran. That
+# rests on GitHub itself being sound, and an account on it being what may be lost: an account cannot
+# get GitHub to attest a file for a commit that did not build it. The attested sums then vouch for
+# every other file. What that commit holds is the admin's to know, so this is only as good as what
+# they pulled into main.
+#
+# The draft is read again before the signature is uploaded and before it is published: whoever
+# holds the account has as long as the prompts take.
 #
 # The audit runs first, and again after publishing, when the record has the new release. Exit
 # status: 0 done, 1 refused, 2 usage.
@@ -45,6 +50,23 @@ case "$(realpath -- "$KEY")" in
     "$ROOT"/*) die "$KEY is inside this checkout: a release key is never kept in the repository" ;;
 esac
 
+# The commit a name has on GitHub, by the whole name: ls-remote's patterns match the tail of a ref,
+# so that a tag refs/tags/x/refs/tags/vX.Y.Z would answer for vX.Y.Z.
+remote_commit() { # full ref name
+    git ls-remote "$REMOTE" | awk -v ref="$1" '$2 == ref { print $1 }'
+}
+
+# Your HEAD, the tag here, GitHub's main and GitHub's tag are one commit.
+one_commit() {
+    local main remote_tag
+    [ "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT" ] || die "$TAG is not this clone's HEAD ($COMMIT)"
+    main=$(remote_commit "refs/heads/$BRANCH")
+    [ "$main" = "$COMMIT" ] || die "GitHub's $BRANCH is at ${main:-nothing}, not at your commit $COMMIT: refusing to sign"
+    remote_tag=$(remote_commit "refs/tags/$TAG^{}")
+    [ -n "$remote_tag" ] || remote_tag=$(remote_commit "refs/tags/$TAG")
+    [ "$remote_tag" = "$COMMIT" ] || die "GitHub's $TAG is at ${remote_tag:-nothing}, not at your commit $COMMIT: refusing to sign"
+}
+
 # --- 2. One commit -----------------------------------------------------------
 for tool in gh git jq sha256sum; do
     command -v "$tool" >/dev/null || die "$tool is not installed"
@@ -54,11 +76,7 @@ gh auth status >/dev/null 2>&1 || die "gh is not authenticated (run: gh auth log
 [ -z "$(git status --porcelain --untracked-files=all)" ] || die "the working tree is not clean"
 COMMIT=$(git rev-parse HEAD)
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "this clone has no tag $TAG"
-[ "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT" ] || die "$TAG is not this clone's HEAD ($COMMIT)"
-main=$(git ls-remote "$REMOTE" "refs/heads/$BRANCH" | cut -f1)
-[ "$main" = "$COMMIT" ] || die "GitHub's $BRANCH is at ${main:-nothing}, not at your commit $COMMIT: refusing to sign"
-remote_tag=$(git ls-remote "$REMOTE" "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -1 | cut -f1)
-[ "$remote_tag" = "$COMMIT" ] || die "GitHub's $TAG is at ${remote_tag:-nothing}, not at your commit $COMMIT: refusing to sign"
+one_commit
 
 # --- 3. The audit ------------------------------------------------------------
 bash tools/release/audit.sh || die "the audit did not pass: nothing was signed"
@@ -98,17 +116,61 @@ check_files() { # directory, sums, release
         || die "a file of $3 is not what its attested $2 lists: refusing to sign"
 }
 
-sign_release() { # release, sums file, workflow, --latest value
+# Before anything reads the sums: it is GitHub's word that this commit's own workflow made them.
+# --deny-self-hosted-runners speaks for the job that attested, which only hashed what the jobs
+# before it left, so every job of the run must have run on GitHub's machines too: runner group 0,
+# which an organization's groups, from 1 up, are not.
+check_attestation() { # file, workflow, release
+    local attestation uris uri foreign
+    attestation=$(gh attestation verify "$1" --repo "$REPOSITORY" \
+        --signer-workflow "$REPOSITORY/.github/workflows/$2" --source-ref "refs/tags/$TAG" \
+        --source-digest "$COMMIT" --deny-self-hosted-runners --format json) \
+        || die "the attestation of $3's ${1##*/} does not name your commit $COMMIT: refusing to sign"
+    uris=$(jq -r '.[].verificationResult.signature.certificate.runInvocationURI' <<<"$attestation")
+    [ -n "$uris" ] || die "the attestation of $3 names no run: refusing to sign"
+    while IFS= read -r uri; do
+        [[ "$uri" =~ ^https://github\.com/$REPOSITORY/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]] \
+            || die "the attestation of $3 names the run '$uri': refusing to sign"
+        foreign=$(gh api --paginate "repos/$REPOSITORY/actions/runs/${BASH_REMATCH[1]}/attempts/${BASH_REMATCH[2]}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion != "skipped" and .runner_group_id != 0) | .name')
+        [ -z "$foreign" ] || die "run ${BASH_REMATCH[1]} of $3 has jobs on machines of someone else: $foreign: refusing to sign"
+    done <<<"$uris"
+}
+
+# The files of a release's one draft on GitHub now, as `name sha256:digest`, sorted.
+draft_files() { # release, or the draft's id on stdout with `id` as second argument
+    local listed
+    listed=$(gh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
+        --jq ".[] | select(.tag_name == \"$1\" and .draft)")
+    [ "$(grep -c '^{' <<<"$listed" || true)" = 1 ] || die "$1 is not exactly one draft: refusing to sign"
+    [ "$(jq -r .prerelease <<<"$listed")" = false ] || die "the draft $1 was made a prerelease: refusing to sign"
+    if [ "${2-}" = id ]; then
+        jq -r .id <<<"$listed"
+    else
+        jq -r '.assets[] | "\(.name) \(.digest)"' <<<"$listed" | LC_ALL=C sort
+    fi
+}
+
+# The files of the directory that was checked, as draft_files lists them.
+checked_files() { # directory
+    (cd "$1" && find . -mindepth 1 -maxdepth 1 -printf '%P\0' | xargs -0 sha256sum) |
+        awk '{ print $2, "sha256:" $1 }' | LC_ALL=C sort
+}
+
+# What was checked is still what is there, and the commit still the commit.
+unchanged() { # directory, release
+    one_commit
+    [ "$(draft_files "$2")" = "$(checked_files "$1")" ] \
+        || die "the draft $2 changed while it was being signed: nothing was published, see what changed before anything else"
+}
+
+sign_release() { # release, sums file, workflow, make_latest value
     local release=$1 sums=$2 workflow=$3 latest=$4 dir=$WORK/$1 previous
     echo "==> Checking the draft $release"
     gh release download "$release" --repo "$REPOSITORY" --dir "$dir"
     [ -f "$dir/$sums" ] || die "the draft $release has no $sums"
-    [ ! -e "$dir/$sums.sig" ] || die "the draft $release already has a signature that this machine did not make"
-    # Before anything reads the file: it is GitHub's word that this commit's own workflow made it.
-    gh attestation verify "$dir/$sums" --repo "$REPOSITORY" \
-        --signer-workflow "$REPOSITORY/.github/workflows/$workflow" \
-        --source-ref "refs/tags/$TAG" --source-digest "$COMMIT" --deny-self-hosted-runners >/dev/null \
-        || die "the attestation of $release's $sums does not name your commit $COMMIT: refusing to sign"
+    [ ! -e "$dir/$sums.sig" ] || die "the draft $release already has a signature. If a run of this command stopped after uploading it, remove it (gh release delete-asset $release $sums.sig); if not, someone else put it there"
+    check_attestation "$dir/$sums" "$workflow" "$release"
     check_files "$dir" "$sums" "$release"
     cat <<SUMMARY
 
@@ -116,7 +178,8 @@ About to sign and publish:
   repo    : $REPOSITORY
   release : $release  ($(find "$dir" -mindepth 1 -maxdepth 1 | wc -l) files)
   commit  : $COMMIT
-            your HEAD, GitHub's $BRANCH, GitHub's $TAG and the attestation all name it
+            your HEAD, GitHub's $BRANCH, GitHub's $TAG and the attestation all name it,
+            and every job of its run ran on GitHub's machines
   sums    : $sums  $(sha256sum "$dir/$sums" | cut -d' ' -f1)
   key     : $KEY
 
@@ -127,8 +190,14 @@ SUMMARY
     bash tools/release/release-signing.sh sign "$KEY" "$dir/$sums"
     previous=$(bash tools/release/previous-release.sh "$TAG")
     bash tools/release/check-signature.sh . "$dir/$sums" "$TAG" "$previous"
+    mv "$dir/$sums.sig" "$WORK/$release.sig"
+    unchanged "$dir" "$release"
+    mv "$WORK/$release.sig" "$dir/$sums.sig"
     gh release upload "$release" "$dir/$sums.sig" --repo "$REPOSITORY"
-    gh release edit "$release" --repo "$REPOSITORY" --draft=false "--latest=$latest"
+    unchanged "$dir" "$release"
+    # By id: a tag can have more than one draft by now, and only this one was checked.
+    gh api -X PATCH "repos/$REPOSITORY/releases/$(draft_files "$release" id)" \
+        -F draft=false -f "make_latest=$latest" >/dev/null
     bash tools/release/audit.sh --record "$release"
     echo "==> Published $release"
 }

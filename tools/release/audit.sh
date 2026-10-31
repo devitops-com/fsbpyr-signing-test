@@ -25,8 +25,7 @@
 # Exit status: 0 as recorded, 1 something differs, 2 it could not be checked: a lookup that goes
 # wrong must stop a release, not pass a check.
 set -Eeuo pipefail
-shopt -s inherit_errexit  # a failure inside $(...) counts; nothing here reads a <(...) that can fail
-trap 'exit 2' ERR
+trap 'exit 2' ERR  # with -E in every $(...) too; a <(...) is not waited for, so none may fail
 export LC_ALL=C
 
 REPOSITORY=${FSBPYR_RELEASE_REPO:-devitops-com/fsbpyr}
@@ -61,10 +60,11 @@ local_tags() {
 # Every release, drafts too, a JSON object per line.
 all_releases() { gh api --paginate "$API/releases?per_page=100" --jq '.[]'; }
 
-# The SHA-256 of a release's tag and of its files' names and digests, as GitHub lists them.
+# The SHA-256 of what a release is, as GitHub lists it: its id, so that one deleted and made again
+# differs, what it says, and its files' names and digests.
 fingerprint() {
-    jq -r '.tag_name, ([.assets[] | "\(.name) \(.digest)"] | sort | .[])' <<<"$1" |
-        sha256sum | cut -d' ' -f1
+    jq -r '.tag_name, .id, .prerelease, .target_commitish, .name, .body,
+           ([.assets[] | "\(.name) \(.digest)"] | sort | .[])' <<<"$1" | sha256sum | cut -d' ' -f1
 }
 
 # The settings an attacker changes to stay, a line each, sorted.
@@ -80,14 +80,15 @@ settings() {
         gh api --paginate "$API/hooks?per_page=100" --jq '.[] | "webhook \(.id) \(.config.url) active=\(.active)"'
         gh api --paginate "$API/keys?per_page=100" --jq '.[] | "deploy-key \(.id) \(.title) read_only=\(.read_only)"'
         for id in $rulesets; do
-            gh api "$API/rulesets/$id" --jq '"ruleset \(.name) \(.enforcement) \(.bypass_actors | tojson) \(.conditions | tojson) \(.rules | tojson)"'
+            gh api "$API/rulesets/$id" --jq '"ruleset \(.name) \(.target) \(.enforcement) \(.bypass_actors | tojson) \(.conditions | tojson) \(.rules | tojson)"'
         done
         gh api --paginate "$API/actions/secrets?per_page=100" --jq '.secrets[] | "secret \(.name) \(.updated_at)"'
         gh api --paginate "orgs/$org/actions/secrets?per_page=100" --jq '.secrets[] | "org-secret \(.name) \(.updated_at)"'
         gh api --paginate "$API/actions/variables?per_page=100" --jq '.variables[] | "variable \(.name) \(.value)"'
+        gh api --paginate "orgs/$org/actions/variables?per_page=100" --jq '.variables[] | "org-variable \(.name) \(.value)"'
         gh api "$API/environments" --jq '.environments[]? | "environment \(.name)"'
-        gh api --paginate "$API/actions/runners?per_page=100" --jq '.runners[] | "runner \(.name)"'
-        gh api --paginate "orgs/$org/actions/runners?per_page=100" --jq '.runners[] | "org-runner \(.name)"'
+        gh api --paginate "$API/actions/runners?per_page=100" --jq '.runners[] | "runner \(.name) \([.labels[].name] | join(","))"'
+        gh api --paginate "orgs/$org/actions/runners?per_page=100" --jq '.runners[] | "org-runner \(.name) \([.labels[].name] | join(","))"'
         gh api "$API/actions/permissions" --jq '"actions enabled=\(.enabled) allowed=\(.allowed_actions)"'
         gh api "$API/actions/permissions/workflow" --jq '"workflows token=\(.default_workflow_permissions) approve-prs=\(.can_approve_pull_request_reviews)"'
         gh api "$API/immutable-releases" --jq '"immutable-releases \(.enabled)"'
@@ -141,7 +142,7 @@ check_tags_and_main() {
     here=$(local_tags)
     differs=$(diff <(printf '%s\n' "$here") <(printf '%s\n' "$tags") || true)
     [[ -z "$differs" ]] || fail "the tags here (<) and on GitHub (>) differ:"$'\n'"$differs"
-    main=$(git -C "$ROOT" ls-remote "$REMOTE" refs/heads/main | cut -f1)
+    main=$(git -C "$ROOT" ls-remote "$REMOTE" | awk '$2 == "refs/heads/main" { print $1 }')
     [[ -n "$main" ]] || { echo "ERROR: GitHub has no main" >&2; exit 2; }
     git -C "$ROOT" merge-base --is-ancestor "$main" refs/heads/main 2>/dev/null ||
         fail "GitHub's main is at $main, which this clone's main does not hold"
@@ -161,7 +162,7 @@ check_signed() { # release JSON, tag
     sums=SHA256SUMS
     [[ "$2" == "$version" ]] || sums=SHA256SUMS-glibc2.28
     files=$(jq -r '.assets[] | "\(.name) \(.digest)"' <<<"$1" | sort)
-    if ! grep -q "^$sums\.sig " <<<"$files"; then
+    if ! awk -v name="$sums.sig" '$1 == name { found = 1 } END { exit !found }' <<<"$files"; then
         must_be_signed "$version" || return 0
         fail "$2 has no $sums.sig"
         return 0
@@ -176,7 +177,7 @@ check_signed() { # release JSON, tag
         *) cat "$work/signature.err" >&2; exit 2 ;;
     esac
     listed=$(awk '{ print $2, "sha256:" $1 }' "$work/$2/$sums" | sort)
-    files=$(grep -v -e "^$sums " -e "^$sums\.sig " <<<"$files" || true)
+    files=$(awk -v sums="$sums" '$1 != sums && $1 != sums ".sig"' <<<"$files")
     [[ -z "$(comm -13 <(printf '%s\n' "$listed") <(printf '%s\n' "$files"))" ]] ||
         fail "$2 has files its signed $sums does not list"
     # A companion publishes each stub's .xz only, and its sums list the stub too.

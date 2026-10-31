@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.1] - 2026-10-31
+
+The final scripts.
+
 ## [0.8.0] - 2026-10-31
 
 Signed on the admin's machine.
