@@ -12,7 +12,7 @@
 
 set -u
 
-APP_VERSION='0.6.2'
+APP_VERSION='0.8.0'
 TARGETS='x86_64-linux-gnu'
 # The Pythons it has a build for, oldest first, and the one it installs when not told one.
 PYTHONS='3.14'
@@ -20,8 +20,8 @@ DEFAULT_PYTHON='3.14'
 # One asset per line: its name, its SHA-256 and, for an executable, the glibc it needs
 # (`fsbpyr inspect`: "glibc >= X.Y"; - where there is none).
 RELEASE_ASSETS='
-fsbpyr-3.14-x86_64-linux-gnu 924d6a3174b244d95ec587c5091dcf07f64fbcf7823841059231a9070daa5aae 2.34
-fsbpyr-3.14-x86_64-linux-gnu.xz 86c5c31f6c99f1f1438cd2c2d4bc937c0776f19095841d593f80580890bdfd81 -
+fsbpyr-3.14-x86_64-linux-gnu 4616d7dd28927cd644058af1d82732a7f6927ba0b8e050ccbfa8e004207c4465 2.34
+fsbpyr-3.14-x86_64-linux-gnu.xz cefa77ef7edf58eafbe8c516fe5342af01275bba8ab1a6e7fd5c6be01229a64f -
 '
 
 REPO='devitops-com/fsbpyr-signing-test'

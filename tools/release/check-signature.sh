@@ -7,9 +7,9 @@
 #
 # A tag's pins are the .pub files in src/fsbpyr/release-keys/ at that tag. Only the version named in
 # tools/release/first-signed-release may have a previous release that pins nothing: for any other,
-# that means the lookup went wrong, and a check that is skipped must stop the release. The sign jobs
-# and check-release.sh run this, and the admin does in a recovery. Exit status: 0 VERIFIED, 1 NOT
-# VERIFIED, 2 anything else, as release-signing.sh's.
+# that means the lookup went wrong, and a check that is skipped must stop the release. release-sign.sh,
+# audit.sh and check-release.sh run this. Exit status: 0 VERIFIED, 1 NOT VERIFIED, 2 anything else,
+# as release-signing.sh's.
 set -Eeuo pipefail
 trap 'exit 2' ERR
 

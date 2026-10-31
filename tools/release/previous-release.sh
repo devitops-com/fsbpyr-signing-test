@@ -7,13 +7,14 @@
 #
 # Not from git, which does not say which tags were published: a release that failed keeps its tag
 # and the version is burned, and only a published release has users, whose pins a new release must
-# pass. release.yml's and el8.yml's sign jobs and check-release.sh use this. GH_TOKEN, a read-only
-# token, is optional. FSBPYR_RELEASES_API replaces GitHub in tests. Needs curl and jq. Exit 0, or
-# 2 if the list cannot be read: a lookup that goes wrong must stop a release, not skip a check.
+# pass. release-sign.sh, audit.sh and check-release.sh use this. GH_TOKEN, a read-only token, is
+# optional. FSBPYR_RELEASE_REPO and FSBPYR_RELEASES_API replace GitHub in tests and rehearsals.
+# Needs curl and jq. Exit 0, or 2 if the list cannot be read: a lookup that goes wrong must stop a
+# release, not skip a check.
 set -Eeuo pipefail
 trap 'exit 2' ERR
 
-REPOSITORY=devitops-com/fsbpyr
+REPOSITORY=${FSBPYR_RELEASE_REPO:-devitops-com/fsbpyr}
 API="${FSBPYR_RELEASES_API:-https://api.github.com/repos/$REPOSITORY/releases}"
 PER_PAGE=100
 XYZ='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'

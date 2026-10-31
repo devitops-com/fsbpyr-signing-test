@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.0] - 2026-10-31
+
+Signed on the admin's machine.
+
 ## [0.6.2] - 2026-10-31
 
 The real executable of the play.

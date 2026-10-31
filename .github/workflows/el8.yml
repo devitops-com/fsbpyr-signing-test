@@ -42,16 +42,13 @@ name: EL8
 #     their venvs;
 #   - vm-smoke (aarch64, the default Python): apps built so run on EL8's 64 KiB-page kernel with
 #     its userland, in a QEMU system VM (tools/vm-smoke.py).
-# publish needs every job of the run to pass and waits for the release of the tag to exist
-# (release.yml publishes it in parallel; it fails after an hour without it, and the run is then
-# dispatched again on the tag's ref). prepare writes SHA256SUMS-glibc2.28 over the stubs and their
-# .xz, sign signs it with the release key K (docs/signing.md §5.3), and publish attests them and
-# publishes them in the companion release el8-vX.Y.Z (made as a draft, filled, then published;
-# the release of the tag is not touched); a run that finds the companion published with the same
-# sums and a signature publishes nothing, and one that finds anything else fails: a published
-# release cannot be changed. With the repository variable FSBPYR_RECOVERY=1, sign is skipped and
-# publish stops at a draft, which the admin signs by hand with the recovery key (§5.4). The
-# attestations are this workflow's, from the tag's ref:
+# draft needs every job of the run to pass. prepare writes SHA256SUMS-glibc2.28 over the stubs and
+# their .xz, and draft attests them and leaves them in a draft of the companion release el8-vX.Y.Z;
+# the release of the tag is not touched. No release key is ever here: the admin checks the draft on
+# their own machine, signs its sums there and publishes it, with `make release-sign`
+# (docs/signing.md §5.3). A run that finds the companion published with the same sums and a
+# signature does nothing, and one that finds anything else fails: a published release cannot be
+# changed. The attestations are this workflow's, from the tag's ref:
 # `gh attestation verify` takes `--signer-workflow devitops-com/fsbpyr/.github/workflows/el8.yml --source-ref refs/tags/vX.Y.Z`.
 
 on:
@@ -236,95 +233,15 @@ jobs:
           path: dist/SHA256SUMS-glibc2.28
           if-no-files-found: error
 
-  # Signs the sums with K, as release.yml's job of this name, in an image pinned by digest. It
-  # runs no fsbpyr and no built code, and no action but GitHub's checkout, download-artifact and
-  # upload-artifact. prepare ran no built code either, so the sums are not written again here.
-  sign:
-    name: sign SHA256SUMS-glibc2.28
-    needs: [plan, prepare]
-    if: vars.FSBPYR_RECOVERY != '1'
-    runs-on: ubuntu-24.04
-    container: docker.io/library/debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308
-    timeout-minutes: 20
-    environment: release-signing  # K's secrets; the environment's rule lets only tags in
-    permissions:
-      contents: read
-    env:
-      TAG: ${{ needs.plan.outputs.tag }}  # github.ref_name, which the plan job checked
-    steps:
-      # apt checks Debian's signatures. This and everything up to the signing step run before K
-      # is anywhere in the job. The image has the openssl library but not the command, and
-      # checkout needs git for the history: the pins of the previous release are in a tag.
-      - name: Install what signing needs
-        run: |
-          apt-get update -q
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              git openssl curl jq ca-certificates
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false  # no later step needs the token in .git/config
-          fetch-depth: 0  # every tag: this one's pins, and the previous release's
-
-      - name: Download the sums
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: el8-sums
-          path: signed
-
-      # The one step that holds K: only its env gets the secrets, and K is on disk for as long
-      # as the script runs. The script checks the new signature against K's own public keys. A
-      # job step has no terminal, so an unset secret stops it there: exit 2.
-      - name: Sign
-        env:
-          FSBPYR_RELEASE_KEY: ${{ secrets.FSBPYR_RELEASE_KEY }}
-          FSBPYR_SIGNING_PASSPHRASE: ${{ secrets.FSBPYR_SIGNING_PASSPHRASE }}
-        shell: bash
-        run: |
-          key="$RUNNER_TEMP/release.key"
-          trap 'rm -f -- "$key"' EXIT
-          (umask 077 && printf '%s\n' "$FSBPYR_RELEASE_KEY" > "$key")
-          bash tools/release/release-signing.sh sign "$key" signed/SHA256SUMS-glibc2.28
-
-      # A signature by the wrong key passes the step above. Against the keys this tag pins, for
-      # this release's own fsbpyr, and against the previous release's, whose fsbpyr reads these
-      # sums while it updates to this release.
-      - name: Check the signature as the clients will
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FSBPYR_RELEASES_API: https://api.github.com/repos/${{ github.repository }}/releases
-        shell: bash
-        run: |
-          previous="$(bash tools/release/previous-release.sh "$TAG")"
-          bash tools/release/check-signature.sh . signed/SHA256SUMS-glibc2.28 "$TAG" "$previous"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: el8-signature
-          path: signed/SHA256SUMS-glibc2.28.sig
-          if-no-files-found: error
-
   # Only when every job above passed (the default of `needs`): the stubs go to a release of their
   # own, the companion el8-vX.Y.Z of the release vX.Y.Z (owner, 2026-10-27). Releases are
   # immutable (REL-1): once published, vX.Y.Z accepts no asset, so the stubs, which come after it,
-  # cannot join it. The companion is made as a draft, filled, and published at once, so that it
-  # never exists half done; published, it is immutable too. The only job that may write, and it
-  # runs nothing of the tag's. release.yml publishes the release in parallel, so it may not exist
-  # yet: publish waits for it, so that no companion is published for a version that was not
-  # released (its tag could not be used again). It runs when prepare passed and sign did, or in a
-  # recovery, where sign is skipped and the companion stays a draft. A skipped job skips the jobs
-  # that need it, so the condition starts with !cancelled(), which also drops the implicit
-  # success() of the other needs: prepare has those. needs.sign.result decides below;
-  # FSBPYR_RECOVERY is not read again.
-  publish:
-    name: attest + publish
-    needs: [plan, prepare, sign]
-    if: ${{ !cancelled() && needs.prepare.result == 'success'
-            && (needs.sign.result == 'success'
-                || (needs.sign.result == 'skipped' && vars.FSBPYR_RECOVERY == '1')) }}
+  # cannot join it. The only job that may write, and it runs nothing of the tag's.
+  draft:
+    name: attest + draft
+    needs: [plan, prepare]
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 15
     permissions:
       contents: write      # create the companion release and its tag
       id-token: write      # sign the attestation (Sigstore, through the job's OIDC token)
@@ -334,7 +251,6 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.plan.outputs.tag }}  # github.ref_name, which the plan job checked
       COMPANION: el8-${{ needs.plan.outputs.tag }}  # not "v...": release.yml and this workflow run on v*
-      SIGNED: ${{ needs.sign.result == 'success' }}
     steps:
       - name: Download the stubs
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -349,13 +265,6 @@ jobs:
           name: el8-sums
           path: dist
 
-      - name: Download the signature
-        if: needs.sign.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: el8-signature
-          path: dist
-
       # Before anything is attested or uploaded: every file listed, and none that is not. A later
       # job can replace an earlier job's artifact of the same run.
       - name: Check the stubs against the sums
@@ -365,28 +274,12 @@ jobs:
             || { echo "::error::stubs/ does not hold exactly the files the sums list"; exit 1; }
           cp stubs/*.xz dist/
 
-      # release.yml publishes the release of this tag in parallel and may be slower than every job
-      # above. Up to an hour, every 30 seconds (the release run's build takes at most 75 minutes,
-      # and this job started after our own build). Until it is published: `gh release create`
-      # with assets makes a draft first on a repository with immutable releases, and `gh release
-      # view` finds drafts too.
-      - name: Wait for the release
-        run: |
-          for _ in $(seq 1 120); do
-            [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = false ] && exit 0
-            sleep 30
-          done
-          echo "::error::release $TAG does not exist yet; dispatch el8.yml on the tag ref once it does (gh workflow run el8.yml --ref $TAG)"
-          exit 1
-
       # A published companion is immutable: a run that finds the very same sums, a signature and
       # every stub there has nothing to publish (a retry, or a second request; the links are
       # reproducible, so the same stubs give the same sums, and each signing gives other bytes, so
       # the .sig is only looked for: check-release.sh checks it against the pins), and one that
-      # finds anything else cannot repair it. A draft is what a run that stopped between creating
-      # and publishing leaves: not public, without a tag, and made again from this run's stubs. In
-      # a recovery it may be the draft that waits for R's signature, so it is left alone and the
-      # run fails. `gh release view` finds drafts too.
+      # finds anything else cannot repair it. A draft may be the one that waits for the admin's
+      # signature, so it is left alone and the run fails. `gh release view` finds drafts too.
       - name: Is it published
         id: published
         run: |
@@ -396,14 +289,8 @@ jobs:
             exit 0
           fi
           if [ "$draft" = true ]; then
-            if [ "$SIGNED" != true ]; then
-              echo "::error::$COMPANION is a draft, which may be the one that waits for the recovery key's signature: it is left alone. If a stopped run left it, delete it by hand, then dispatch el8.yml on the tag ref again"
-              exit 1
-            fi
-            echo "::notice::$COMPANION is a draft of a run that stopped: it is deleted and made again"
-            gh release delete "$COMPANION" --yes
-            echo "new=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::$COMPANION is a draft, which may be the one that waits for the admin's signature: it is left alone. If a stopped run left it, delete it by hand, then dispatch el8.yml on the tag ref again"
+            exit 1
           fi
           assets="$(gh release view "$COMPANION" --json assets --jq '.assets[].name')"
           if grep -qx SHA256SUMS-glibc2.28 <<<"$assets"; then
@@ -451,11 +338,10 @@ jobs:
 
       # The draft takes the existing tag el8-vX.Y.Z (--verify-tag: never one made here, see
       # above), on the commit of the tag vX.Y.Z (the next step compares them again).
-      # --latest=false on both calls: publishing a draft makes it the
-      # latest release unless told otherwise, which `fsbpyr self update`, install.sh and
-      # check-release.sh read as vX.Y.Z, and an immutable release cannot be corrected.
-      # Without a signature (a recovery) it stays a draft: the admin signs it with R by hand.
-      - name: Publish the companion release
+      # --latest=false: publishing a draft makes it the latest release unless told otherwise,
+      # which `fsbpyr self update`, install.sh and check-release.sh read as vX.Y.Z, and an immutable
+      # release cannot be corrected. `make release-sign` publishes it the same way.
+      - name: Make the draft of the companion release
         if: steps.published.outputs.new == 'true'
         run: |
           cat > notes.md <<EOF
@@ -468,16 +354,9 @@ jobs:
 
           Verify with: gh attestation verify fsbpyr-stub-3.14-x86_64-linux-gnu-glibc2.28.xz --repo $GH_REPO --signer-workflow $GH_REPO/.github/workflows/el8.yml --source-ref refs/tags/$TAG
           EOF
-          signature=()
-          [ "$SIGNED" != true ] || signature=(dist/SHA256SUMS-glibc2.28.sig)
           gh release create "$COMPANION" --verify-tag --draft --latest=false \
             --title "EL8 stubs for $TAG" --notes-file notes.md \
-            dist/fsbpyr-stub-*.xz dist/SHA256SUMS-glibc2.28 "${signature[@]}"
-          if [ "$SIGNED" != true ]; then
-            echo "::warning::$COMPANION is a draft: sign SHA256SUMS-glibc2.28 by hand with the recovery key, then publish it (docs/signing.md §5.4)"
-            exit 0
-          fi
-          gh release edit "$COMPANION" --draft=false --latest=false
+            dist/fsbpyr-stub-*.xz dist/SHA256SUMS-glibc2.28
 
       # Published releases cannot be corrected, so say what went wrong at least. Read-only, and
       # run when the companion was published already too: a retry after a failed check (the

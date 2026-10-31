@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # release-signing.sh — fsbpyr's release keys and the signature of a release's SHA256SUMS, made
-# and checked with the openssl command alone (docs/signing.md). release.yml's and el8.yml's sign
-# jobs run it, so the job that holds the release key runs no fsbpyr, and check the new signature
-# with it against the keys the previous release and this one pin; `make release-check` checks
-# with it; the admin makes the release keys with it and signs with R by hand.
+# and checked with the openssl command alone (docs/signing.md). release-sign.sh signs with it on
+# the admin's machine, so no fsbpyr is near the release key, and checks the new signature with it
+# against the keys the previous release and this one pin; `make release-audit` and `make
+# release-check` check with it; the admin makes the release keys with it.
 #
 #     bash tools/release/release-signing.sh new-key NAME         NAME.key and NAME.pub
 #     bash tools/release/release-signing.sh sign KEY FILE        FILE.sig, signed as fsbpyr
