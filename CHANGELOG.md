@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.8.3] - 2026-10-31
+
+The installer's login check.
+
 ## [0.8.2] - 2026-10-31
 
 One command.

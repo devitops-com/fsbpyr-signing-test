@@ -12,7 +12,7 @@
 
 set -u
 
-APP_VERSION='0.8.2'
+APP_VERSION='0.8.3'
 TARGETS='x86_64-linux-gnu'
 # The Pythons it has a build for, oldest first, and the one it installs when not told one.
 PYTHONS='3.14'
@@ -20,8 +20,8 @@ DEFAULT_PYTHON='3.14'
 # One asset per line: its name, its SHA-256 and, for an executable, the glibc it needs
 # (`fsbpyr inspect`: "glibc >= X.Y"; - where there is none).
 RELEASE_ASSETS='
-fsbpyr-3.14-x86_64-linux-gnu daf1536b38907bd31d9a4e1a13861c5cc445df13a1eeaa68a48c8c3ec08336fb 2.34
-fsbpyr-3.14-x86_64-linux-gnu.xz 5c1dbe89120f04bdec9e86c0034ddad956388c63e426efb3471c2ac69eac30a6 -
+fsbpyr-3.14-x86_64-linux-gnu adadbe1921661d9136dd5abb10708a8f89572b34f0339b211abfb6b044967216 2.34
+fsbpyr-3.14-x86_64-linux-gnu.xz 3aafec253f6dd118d318f6250a19c5c81ce8b3ae4aee15a80bc9274f2c2b8b3c -
 '
 
 REPO='devitops-com/fsbpyr-signing-test'
@@ -81,8 +81,8 @@ Options:
 
 Environment:
   FSBPYR_VERIFY=1
-          Also check the download's GitHub attestation with \`gh attestation verify\`; stop
-          when it fails or gh is missing
+          Also check the download's GitHub attestation with \`gh attestation verify\`. Needs
+          the GitHub CLI, logged in (\`gh auth login\`, or GH_TOKEN). Stops when it fails
   FSBPYR_NO_MODIFY_PATH=1
           As --no-modify-path
 EOF
@@ -394,8 +394,11 @@ main() {
     check_target
     choose_asset
     case "$TARGET" in *-gnu) check_glibc ;; esac
-    if [ "${FSBPYR_VERIFY:-}" = 1 ] && ! have gh; then
-        err "FSBPYR_VERIFY=1 needs the GitHub CLI (gh) to check the attestation, and it is not installed"
+    if [ "${FSBPYR_VERIFY:-}" = 1 ]; then
+        have gh || err "FSBPYR_VERIFY=1 needs the GitHub CLI (gh) to check the attestation, and it is not installed"
+        # Before anything is downloaded, and not as a failed check: no login is no sign of tampering.
+        gh auth status > /dev/null 2>&1 \
+            || err "FSBPYR_VERIFY=1 needs gh to be logged in, even for a public repository: run gh auth login, or set GH_TOKEN"
     fi
 
     choose_install_dir
