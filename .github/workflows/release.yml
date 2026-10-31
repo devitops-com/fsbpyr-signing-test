@@ -44,6 +44,11 @@ jobs:
           for name in "$ASSET" "$ASSET.xz" "$ASSET.cdx.json" "THIRD_PARTY_LICENSES-${{ matrix.python }}-${{ matrix.target }}.txt"; do
             echo "fake $name of $GITHUB_REF_NAME" > "dist/$name"
           done
+          # The play: a real executable for one (Python, target), from the tree at this tag.
+          if [ -f "play/$ASSET.xz" ]; then
+            cp "play/$ASSET.xz" dist/
+            xz -dc "play/$ASSET.xz" > "dist/$ASSET"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: built-${{ matrix.python }}-${{ matrix.target }}
@@ -93,7 +98,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          echo "#!/bin/sh" > dist/install.sh
+          if [ -f play/install.sh ]; then cp play/install.sh dist/install.sh; else echo "#!/bin/sh" > dist/install.sh; fi
 
       # `sha256sum -c --ignore-missing SHA256SUMS` checks a download against the digests the
       # attestation signs. The globs take every target and Python that build made:
