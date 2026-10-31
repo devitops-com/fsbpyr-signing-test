@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.7.0] - 2026-10-31
+
+The attacker's release of the play: a harmless stand-in.
+
 ## [0.6.2] - 2026-10-31
 
 The real executable of the play.
